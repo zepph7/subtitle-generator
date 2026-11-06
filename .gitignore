@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output (the installer is published on GitHub Releases, not committed)
+dist/
+
+# Python
+__pycache__/
+*.pyc
+
+# Files the app creates next to videos while transcribing
+*.partial.jsonl
+*.state.json
+*.state.json.tmp
+*.srt.part
+
+# Local tooling
+.remember/
+graphify-out/

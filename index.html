@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'">
+<title>Subtitle Generator</title>
+<style>
+  body { font-family: Segoe UI, sans-serif; background:#16181d; color:#e8e8e8; margin:0; padding:20px; }
+  h2 { margin:0 0 16px; }
+  .row { display:flex; gap:10px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }
+  button, select { background:#2a2e38; color:#e8e8e8; border:1px solid #3a3f4b; border-radius:6px; padding:8px 14px; font-size:14px; cursor:pointer; }
+  button.primary { background:#3b82f6; border-color:#3b82f6; }
+  button:disabled, select:disabled { opacity:.5; cursor:default; }
+  label { font-size:14px; display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none; }
+  .spacer { flex:1; }
+  #count { color:#9aa; font-size:13px; }
+  #list { max-height:400px; overflow-y:auto; border-radius:8px; }
+  .empty { color:#778; text-align:center; padding:40px 10px; border:2px dashed #3a3f4b; border-radius:8px; font-size:14px; }
+  .item { background:#1f232b; border-radius:6px; padding:10px; margin-bottom:8px; }
+  .name { font-size:13px; margin-bottom:6px; word-break:break-all; display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .right { display:flex; align-items:center; gap:8px; flex-shrink:0; max-width:60%; }
+  .bar { height:6px; background:#2a2e38; border-radius:3px; overflow:hidden; }
+  .fill { height:100%; width:0; background:#3b82f6; transition:width .2s; }
+  .waiting .fill, .error .fill, .cancelled .fill { background:#64748b; }
+  .done .fill { background:#22c55e; } .skipped .fill { background:#6b7280; }
+  .error .bar { box-shadow: inset 0 0 0 1px #ef4444; }
+  .state { color:#9aa; text-align:right; }
+  .resume .state { color:#fbbf24; }
+  .error .state { color:#f87171; }
+  .x { background:none; border:none; color:#9aa; padding:0 4px; font-size:16px; line-height:1; }
+  .x:hover { color:#f87171; }
+  .small { padding:3px 8px; font-size:12px; white-space:nowrap; }
+  #msg { min-height:20px; margin-top:10px; font-size:14px; color:#cbd5e1; }
+  #drop { display:none; position:fixed; inset:0; background:rgba(59,130,246,.15); border:3px dashed #3b82f6;
+          align-items:center; justify-content:center; font-size:20px; pointer-events:none; }
+  body.dragging #drop { display:flex; }
+</style>
+</head>
+<body>
+<h2>Subtitle Generator</h2>
+<div class="row">
+  <button id="pick">Select videos</button>
+  <button id="folder">Select folder</button>
+  <button id="clear">Clear all</button>
+  <span class="spacer"></span>
+  <span id="count"></span>
+</div>
+<div class="row">
+  <select id="model">
+    <option>tiny</option><option>base</option><option selected>small</option><option>medium</option>
+  </select>
+  <select id="lang">
+    <option value="en">English</option><option value="sw">Swahili</option><option value="auto">Auto-detect</option>
+  </select>
+  <label><input type="checkbox" id="skip" checked> Skip files that already have an .srt</label>
+  <span class="spacer"></span>
+  <button id="start" class="primary" disabled>Start</button>
+  <button id="cancel" disabled>Cancel</button>
+</div>
+<div id="list"></div>
+<div id="msg"></div>
+<div id="drop">Drop videos or folders to add them</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const base = p => p.split(/[\\/]/).pop();
+const key = p => p.replace(/\//g, '\\').toLowerCase();   // Windows paths are case-insensitive
+
+// it = { path, state, pct, error, info, restart, el }
+//   state: waiting | running | done | skipped | error | cancelled
+//   info:  saved progress from main (see inspect() in main.js)
+let items = [];
+let running = false;
+
+const pctText = p => Math.floor(p) + '%';
+const settingsDiffer = info => info.model && (info.model !== $('model').value || info.language !== $('lang').value);
+const canResume = it => !it.restart && it.info && it.info.hasPartial;
+const willSkip = it => !it.restart && it.info && !it.info.hasPartial && it.info.hasSrt &&
+                       (it.info.status === 'done' || $('skip').checked);
+const isRunnable = it => it.restart || ['waiting', 'error', 'cancelled'].includes(it.state);
+const hasProgress = it => it.info && (it.info.hasPartial || it.info.hasSrt || it.info.status);
+
+function stateText(it) {
+  const info = it.info || {};
+  const resume = canResume(it)
+    ? `Resume from ${pctText(info.pct)}` + (settingsDiffer(info) ? ` (started with ${info.model}/${info.language})` : '')
+    : '';
+  switch (it.state) {
+    case 'running': return it.pct > 0 ? pctText(it.pct) : (it.resumed ? 'Resuming...' : 'Running...');
+    case 'done': return 'Done';
+    case 'skipped': return 'Skipped';
+    case 'error': return 'Failed: ' + (it.error || 'unknown') + (resume ? ' — ' + resume : '');
+    case 'cancelled': return 'Cancelled' + (resume ? ' — ' + resume : '');
+  }
+  if (it.restart) return 'Will restart from 0%';
+  if (resume) return resume;
+  if (willSkip(it)) return info.status === 'done' ? 'Already done — will skip' : 'Has .srt — will skip';
+  return 'Waiting';
+}
+
+function barWidth(it) {
+  if (it.state === 'done' || it.state === 'skipped') return 100;
+  if (it.state === 'running') return it.pct;
+  return canResume(it) ? it.info.pct : 0;
+}
+
+function itemEl(it) {
+  const div = document.createElement('div');
+  div.className = 'item ' + it.state + (canResume(it) && it.state !== 'running' ? ' resume' : '');
+
+  const name = document.createElement('div');
+  name.className = 'name';
+  const label = document.createElement('span');
+  label.textContent = base(it.path);
+  label.title = it.path;
+
+  const right = document.createElement('span');
+  right.className = 'right';
+  const st = document.createElement('span');
+  st.className = 'state';
+  st.textContent = stateText(it);
+  right.append(st);
+
+  if (!running && it.state !== 'running' && (hasProgress(it) || it.restart || it.state !== 'waiting')) {
+    const rb = document.createElement('button');
+    rb.className = 'small';
+    rb.textContent = it.restart ? 'Keep progress' : 'Restart from beginning';
+    rb.title = it.restart ? 'Undo: keep the saved progress' : 'Discard saved progress for this file and start at 0%';
+    rb.onclick = () => {
+      it.restart = !it.restart;
+      if (it.restart) { it.state = 'waiting'; it.error = ''; it.pct = 0; }
+      updateItem(it);
+      updateControls();
+    };
+    right.append(rb);
+  }
+
+  if (it.state === 'waiting' && !running) {
+    const x = document.createElement('button');
+    x.className = 'x';
+    x.textContent = '✕';
+    x.title = 'Remove';
+    x.onclick = () => { items = items.filter(i => i !== it); render(); };
+    right.append(x);
+  }
+  name.append(label, right);
+
+  const bar = document.createElement('div');
+  bar.className = 'bar';
+  const fill = document.createElement('div');
+  fill.className = 'fill';
+  fill.style.width = barWidth(it) + '%';
+  bar.append(fill);
+
+  div.append(name, bar);
+  it.el = div;
+  return div;
+}
+
+function updateItem(it) {
+  const old = it.el;
+  const fresh = itemEl(it);
+  if (old && old.isConnected) old.replaceWith(fresh);
+}
+
+function updateControls() {
+  $('start').disabled = running || !items.some(isRunnable);
+  $('cancel').disabled = !running;
+  $('pick').disabled = $('folder').disabled = running;
+  $('clear').disabled = running || items.length === 0;
+  $('model').disabled = $('lang').disabled = $('skip').disabled = running;
+  const resumable = items.filter(canResume).length;
+  $('count').textContent = items.length
+    ? items.length + ' file' + (items.length === 1 ? '' : 's') + (resumable ? ` · ${resumable} resumable` : '')
+    : '';
+}
+
+function render() {
+  const list = $('list');
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'Drag and drop video files or folders here, or use the buttons above.';
+    list.replaceChildren(empty);
+  } else {
+    list.replaceChildren(...items.map(itemEl));
+  }
+  updateControls();
+}
+
+function setMsg(text) { $('msg').textContent = text; }
+
+async function refreshInfo(list) {
+  if (!list.length) return;
+  const infos = await api.inspect(list.map(i => i.path));
+  for (const it of list) it.info = infos[it.path] || null;
+}
+
+async function addFiles(paths) {
+  const byKey = new Map(items.map(i => [key(i.path), i]));
+  const fresh = [], dupes = [];
+  for (const p of paths) {
+    const k = key(p);
+    if (byKey.has(k)) { dupes.push(byKey.get(k)); continue; }
+    const it = { path: p, state: 'waiting', pct: 0, error: '', info: null, restart: false };
+    byKey.set(k, it);
+    fresh.push(it);
+  }
+  // Re-read saved progress for new files and for re-selected ones (e.g. after a crash).
+  await refreshInfo([...fresh, ...dupes.filter(i => i.state !== 'running')]);
+  items.push(...fresh);
+  render();
+
+  if (!fresh.length && !dupes.length) return setMsg('No video files found.');
+  const resumable = fresh.filter(canResume).length;
+  setMsg(`Added ${fresh.length} file${fresh.length === 1 ? '' : 's'}` +
+         (dupes.length ? ` (${dupes.length} duplicate${dupes.length === 1 ? '' : 's'} skipped)` : '') +
+         (resumable ? `, ${resumable} with saved progress` : '') + '.');
+}
+
+$('pick').onclick = async () => { const r = await api.pick(); if (r.length) addFiles(r); };
+
+$('folder').onclick = async () => {
+  const r = await api.pickFolder();
+  if (r === null) return;
+  addFiles(r);
+};
+
+$('clear').onclick = () => { items = []; render(); setMsg(''); };
+
+for (const id of ['model', 'lang', 'skip']) $(id).onchange = () => render();
+
+$('start').onclick = () => {
+  const todo = items.filter(isRunnable);
+  if (!todo.length) return;
+  for (const it of todo) { it.state = 'waiting'; it.pct = 0; it.error = ''; }
+  running = true;
+  render();
+  setMsg('Working...');
+  api.run({
+    files: todo.map(i => ({ path: i.path, restart: i.restart })),
+    model: $('model').value,
+    lang: $('lang').value,
+    skipExisting: $('skip').checked
+  });
+};
+
+$('cancel').onclick = () => { $('cancel').disabled = true; setMsg('Cancelling... (progress is kept)'); api.cancel(); };
+
+const find = file => items.find(i => i.path === file);
+
+api.on('progress', ({ file, pct }) => {
+  const it = find(file);
+  if (!it || !it.el) return;
+  it.pct = pct;
+  it.el.querySelector('.fill').style.width = pct + '%';
+  it.el.querySelector('.state').textContent = stateText(it);
+});
+
+api.on('status', ({ file, state, error, resumePct }) => {
+  const it = find(file);
+  if (!it) return;
+  it.state = state;
+  it.error = error || '';
+  if (state === 'running') {
+    it.restart = false;
+    it.resumed = resumePct > 0;
+    it.pct = resumePct || 0;
+  }
+  updateItem(it);
+  if (state === 'running') it.el.scrollIntoView({ block: 'nearest' });
+});
+
+api.on('finished', async s => {
+  running = false;
+  for (const it of items) it.resumed = false;
+  await refreshInfo(items);           // failed/cancelled items now show "Resume from X%"
+  render();
+  const parts = [`${s.done} done`, `${s.failed} failed`, `${s.skipped} skipped`];
+  if (s.cancelled) parts.push(`${s.cancelled} cancelled`);
+  setMsg('Finished: ' + parts.join(', ') + '.');
+});
+
+// ---- Drag and drop ----
+let dragDepth = 0;
+document.addEventListener('dragenter', e => {
+  e.preventDefault();
+  if (!running && e.dataTransfer.types.includes('Files')) { dragDepth++; document.body.classList.add('dragging'); }
+});
+document.addEventListener('dragleave', e => {
+  e.preventDefault();
+  if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('dragging'); }
+});
+document.addEventListener('dragover', e => {
+  e.preventDefault();
+  e.dataTransfer.dropEffect = running ? 'none' : 'copy';
+});
+document.addEventListener('drop', async e => {
+  e.preventDefault();
+  dragDepth = 0;
+  document.body.classList.remove('dragging');
+  if (running) return;
+  const paths = [...e.dataTransfer.files].map(f => api.pathForFile(f)).filter(Boolean);
+  if (!paths.length) return;
+  addFiles(await api.expand(paths));
+});
+
+render();
+</script>
+</body>
+</html>

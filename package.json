@@ -1,0 +1,51 @@
+{
+  "name": "subtitle-app",
+  "productName": "Subtitle Generator",
+  "version": "1.0.0",
+  "description": "Create .srt subtitles for videos with faster-whisper",
+  "author": "Zepphania",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win",
+    "pack": "electron-builder --win --dir"
+  },
+  "build": {
+    "appId": "com.zepphania.subtitlegenerator",
+    "productName": "Subtitle Generator",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "engine.py",
+      "build/icon.png"
+    ],
+    "asarUnpack": [
+      "engine.py"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "artifactName": "Subtitle-Generator-Setup.exe",
+      "shortcutName": "Subtitle Generator"
+    },
+    "toolsets": {
+      "nsis": "1.2.1"
+    }
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^26.18.0"
+  }
+}
