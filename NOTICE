@@ -1,0 +1,11 @@
+Subtitle Generator
+Copyright 2026 Zepphania
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It uses the following third-party software, each under its own license:
+- Electron (MIT) - https://www.electronjs.org/
+- faster-whisper (MIT) - https://github.com/SYSTRAN/faster-whisper
+- CTranslate2 (MIT) - https://github.com/OpenNMT/CTranslate2
+- OpenAI Whisper models (MIT) - https://github.com/openai/whisper
+- PyAV (BSD-3-Clause) - https://github.com/PyAV-Org/PyAV

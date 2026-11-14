@@ -22,6 +22,9 @@
   <a href="https://github.com/zepph7/subtitle-generator/releases">
     <img src="https://img.shields.io/github/downloads/zepph7/subtitle-generator/total" alt="Downloads">
   </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache%202.0-blue" alt="License: Apache 2.0">
+  </a>
 </p>
 
 ---
@@ -125,3 +128,12 @@ python engine.py video.mp4 --restart      # ignore saved progress
 | `engine.py` | Transcription with faster-whisper, crash-safe resume, `.srt` output |
 | `build/installer.nsh` | Installer page that checks for and installs the required components |
 | `build/icon.png`, `build/icon.ico` | App icon |
+
+## License
+
+Copyright 2026 Zepphania.
+
+Subtitle Generator is free and open-source software, licensed under the
+[Apache License, Version 2.0](LICENSE). You may use, copy, modify and distribute it,
+including commercially, as long as you keep the copyright and license notices and
+mark any files you change. See [`NOTICE`](NOTICE) for the third-party components it uses.

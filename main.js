@@ -245,6 +245,8 @@ ipcMain.handle('run', async (_, opts) => {
 
     if (!restart) {
       if (!info.hasPartial && info.hasSrt && (info.status === 'done' || skipExisting)) {
+        // Finished videos keep only their .srt; remove a leftover .state.json from older versions.
+        if (info.status) fs.rm(stateFor(file), { force: true }, () => {});
         report(file, 'skipped');
         continue;
       }

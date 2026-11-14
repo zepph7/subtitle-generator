@@ -1,9 +1,11 @@
 {
   "name": "subtitle-app",
   "productName": "Subtitle Generator",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Create .srt subtitles for videos with faster-whisper",
   "author": "Zepphania",
+  "license": "Apache-2.0",
+  "repository": "github:zepph7/subtitle-generator",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -22,7 +24,9 @@
       "preload.js",
       "index.html",
       "engine.py",
-      "build/icon.png"
+      "build/icon.png",
+      "LICENSE",
+      "NOTICE"
     ],
     "asarUnpack": [
       "engine.py"
@@ -35,6 +39,7 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "include": "build/installer.nsh",
+      "license": "build/license.txt",
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "artifactName": "Subtitle-Generator-Setup.exe",

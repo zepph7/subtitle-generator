@@ -15,7 +15,8 @@ Crash safety, per video ("movie.mp4"):
     movie.state.json     {"status": pending|running|done|failed, "last_time",
                          "duration", "model", "language", ...}
     movie.srt            built from the .partial.jsonl when the video is
-                         finished; the partial file is then deleted.
+                         finished; the .partial.jsonl and .state.json are then
+                         deleted, so only the .srt remains.
 
 When a .partial.jsonl exists, transcription continues from the end of its last
 segment (via clip_timestamps), keeping the segment numbering.
@@ -141,6 +142,18 @@ def write_state(video: Path, **fields) -> dict:
         except PermissionError:
             time.sleep(0.1)
     return state
+
+
+def remove_progress_files(video: Path) -> None:
+    """Delete the .partial.jsonl / .state.json kept only while a video is unfinished."""
+    for p in (partial_path(video), state_path(video),
+              state_path(video).with_name(state_path(video).name + ".tmp")):
+        for _ in range(5):                  # antivirus/indexers can briefly lock files
+            try:
+                p.unlink(missing_ok=True)
+                break
+            except PermissionError:
+                time.sleep(0.1)
 
 
 # -------------------------------------------------------------- partial file
@@ -275,8 +288,8 @@ def transcribe_one(model: WhisperModel, model_name: str, video: Path, out: Path,
 
         final = load_partial(video)
         build_srt(final, out)
-        write_state(video, status="done", last_time=duration, finished=now())
-        partial_path(video).unlink(missing_ok=True)
+        # The .srt is safely on disk: the progress files are no longer needed.
+        remove_progress_files(video)
         return len(final), reused
     finally:
         del audio, segments, info
@@ -324,13 +337,14 @@ def main() -> int:
         prefix = f"[{i}/{total}] {video.name}"
 
         if args.restart:
-            partial_path(video).unlink(missing_ok=True)
-            state_path(video).unlink(missing_ok=True)
+            remove_progress_files(video)
 
         has_partial = partial_path(video).exists()
         state = read_state(video)
         if not args.restart and not has_partial and out.exists() and (
                 state.get("status") == "done" or not args.overwrite):
+            if state:   # leftover .state.json from an older version of the app
+                remove_progress_files(video)
             print(f"{prefix} - skipped (subtitle already exists)", flush=True)
             skipped += 1
             continue
