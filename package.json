@@ -1,7 +1,7 @@
 {
   "name": "subtitle-app",
   "productName": "Subtitle Generator",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Create .srt subtitles for videos with faster-whisper",
   "author": "Zepphania",
   "license": "Apache-2.0",
