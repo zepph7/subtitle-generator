@@ -17,3 +17,5 @@ __pycache__/
 # Local tooling
 .remember/
 graphify-out/
+.serena/
+Failed InvalidDataError [Errno 1094.txt

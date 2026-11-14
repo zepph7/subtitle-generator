@@ -35,6 +35,7 @@ import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 
+import av
 from faster_whisper import WhisperModel
 from faster_whisper.audio import decode_audio
 from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -49,6 +50,52 @@ SAMPLE_RATE = 16000
 
 class SettingsMismatch(Exception):
     pass
+
+
+class MediaError(Exception):
+    """The file can't be transcribed (empty, damaged, no audio). Message is user-facing."""
+
+
+def human_size(n: int) -> str:
+    if n < 1024:
+        return f"{n} bytes"
+    if n < 1024 ** 2:
+        return f"{n / 1024:.0f} KB"
+    if n < 1024 ** 3:
+        return f"{n / 1024 ** 2:.1f} MB"
+    return f"{n / 1024 ** 3:.2f} GB"
+
+
+def damaged_message(video: Path) -> str:
+    try:
+        size = video.stat().st_size
+    except OSError:
+        return "The file can't be opened. It may have been moved, renamed or deleted."
+    if size == 0:
+        return ("The file is empty (0 KB). It was probably not fully downloaded or copied. "
+                "Download or copy it again, then try again.")
+    if size < 1024 ** 2:
+        return (f"The file is only {human_size(size)}, so it's incomplete or damaged and has no "
+                "playable video. Download or copy it again, then try again.")
+    return (f"The file ({human_size(size)}) is damaged or isn't a supported video/audio format, "
+            "so it can't be read. Check that it plays in a video player, or download it again.")
+
+
+def check_media(video: Path) -> None:
+    """Fail fast with a clear message before loading the Whisper model."""
+    try:
+        size = video.stat().st_size
+    except OSError:
+        raise MediaError(damaged_message(video)) from None
+    if size == 0:
+        raise MediaError(damaged_message(video))
+    try:
+        with av.open(str(video)) as container:
+            if not container.streams.audio:
+                raise MediaError("This video has no audio track, so there is nothing to "
+                                 "turn into subtitles.")
+    except av.error.FFmpegError:
+        raise MediaError(damaged_message(video)) from None
 
 
 def ts(t: float) -> str:
@@ -288,10 +335,18 @@ def main() -> int:
             skipped += 1
             continue
 
+        print(f"{prefix} - transcribing...", flush=True)
+        try:
+            check_media(video)
+        except MediaError as e:
+            print(f"    FAILED: {e}", flush=True)
+            failures.append((video, str(e)))
+            failed += 1
+            continue
+
         if not state or args.restart:
             write_state(video, status="pending", model=args.model, language=lang_setting)
 
-        print(f"{prefix} - transcribing...", flush=True)
         start = time.perf_counter()
         try:
             if model is None:
@@ -311,7 +366,12 @@ def main() -> int:
             failures.append((video, str(e)))
             failed += 1
         except Exception as e:
-            msg = f"{type(e).__name__}: {e}"
+            if isinstance(e, av.error.FFmpegError):      # damaged part found mid-file
+                msg = damaged_message(video)
+                if partial_path(video).exists():
+                    msg += " Progress so far is saved."
+            else:
+                msg = f"{type(e).__name__}: {e}"
             print(f"\n    FAILED: {msg}", flush=True)
             traceback.print_exc(file=sys.stderr)
             try:
