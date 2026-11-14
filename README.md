@@ -47,6 +47,16 @@
 
 All versions are on the [Releases page](https://github.com/zepph7/subtitle-generator/releases).
 
+### Share the app
+
+To share Subtitle Generator, send this link. It always opens the newest version, with downloads for Windows, Linux and macOS:
+
+```
+https://github.com/zepph7/subtitle-generator/releases/latest
+```
+
+The download links in the table above also always give the newest version, so they're safe to share too.
+
 ### Windows
 
 1. Run `Subtitle-Generator-Setup.exe`.
