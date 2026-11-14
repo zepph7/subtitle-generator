@@ -8,6 +8,7 @@
   body { font-family: Segoe UI, sans-serif; background:#16181d; color:#e8e8e8; margin:0; padding:20px; }
   h2 { margin:0 0 16px; }
   .row { display:flex; gap:10px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }
+  #words { flex:1 1 260px; min-width:0; background:#2a2e38; color:#e8e8e8; border:1px solid #3a3f4b; border-radius:6px; padding:8px 10px; font-size:14px; }
   button, select { background:#2a2e38; color:#e8e8e8; border:1px solid #3a3f4b; border-radius:6px; padding:8px 14px; font-size:14px; cursor:pointer; }
   button.primary { background:#3b82f6; border-color:#3b82f6; }
   button:disabled, select:disabled { opacity:.5; cursor:default; }
@@ -31,6 +32,15 @@
   .x:hover { color:#f87171; }
   .small { padding:3px 8px; font-size:12px; white-space:nowrap; }
   #msg { min-height:20px; margin-top:10px; font-size:14px; color:#cbd5e1; }
+  #setup { background:#1f232b; border:1px solid #3a3f4b; border-left:4px solid #fbbf24; border-radius:8px; padding:14px; margin-bottom:14px; font-size:14px; }
+  #setup.ok { display:none; }
+  #setup.checking { border-left-color:#3b82f6; }
+  #setup.error { border-left-color:#ef4444; }
+  #setup h3 { margin:0 0 6px; font-size:15px; }
+  #setup p { margin:6px 0; color:#cbd5e1; }
+  #setup pre { background:#16181d; border-radius:6px; padding:8px 10px; margin:8px 0; font-size:12px; white-space:pre-wrap; word-break:break-all; color:#cbd5e1; }
+  #setupLog { max-height:160px; overflow-y:auto; }
+  #setup .row { margin:10px 0 0; }
   #drop { display:none; position:fixed; inset:0; background:rgba(59,130,246,.15); border:3px dashed #3b82f6;
           align-items:center; justify-content:center; font-size:20px; pointer-events:none; }
   body.dragging #drop { display:flex; }
@@ -47,15 +57,28 @@
 </div>
 <div class="row">
   <select id="model">
-    <option>tiny</option><option>base</option><option selected>small</option><option>medium</option>
+    <option value="tiny">tiny (fastest)</option><option value="base">base</option><option value="small" selected>small (balanced)</option><option value="medium">medium (accurate)</option><option value="large-v3-turbo">large-v3-turbo (most accurate)</option>
   </select>
   <select id="lang">
     <option value="en">English</option><option value="sw">Swahili</option><option value="auto">Auto-detect</option>
   </select>
+  <input id="words" type="text" maxlength="500" spellcheck="false"
+    placeholder="Names / special words (optional), e.g. Zepphania, Dodoma, M-Pesa"
+    title="Words the speaker uses that Whisper might mishear: names, places, brands, technical terms. Separate with commas. Used with the small model and bigger.">
   <label><input type="checkbox" id="skip" checked> Skip files that already have an .srt</label>
   <span class="spacer"></span>
   <button id="start" class="primary" disabled>Start</button>
   <button id="cancel" disabled>Cancel</button>
+</div>
+<div id="setup" class="checking">
+  <h3 id="setupTitle">Checking for Python and faster-whisper...</h3>
+  <p id="setupText"></p>
+  <pre id="setupHint" hidden></pre>
+  <pre id="setupLog" hidden></pre>
+  <div class="row">
+    <button id="setupInstall" class="primary" hidden>Install faster-whisper</button>
+    <button id="setupRecheck" hidden>Check again</button>
+  </div>
 </div>
 <div id="list"></div>
 <div id="msg"></div>
@@ -64,13 +87,16 @@
 <script>
 const $ = id => document.getElementById(id);
 const base = p => p.split(/[\\/]/).pop();
-const key = p => p.replace(/\//g, '\\').toLowerCase();   // Windows paths are case-insensitive
+// Windows paths are case-insensitive; Linux and macOS (by default on Linux) are not.
+const key = api.platform === 'win32' ? p => p.replace(/\//g, '\\').toLowerCase() : p => p;
 
 // it = { path, state, pct, error, info, restart, el }
 //   state: waiting | running | done | skipped | error | cancelled
 //   info:  saved progress from main (see inspect() in main.js)
 let items = [];
 let running = false;
+let reqOk = false;       // Python + faster-whisper available (see the setup panel)
+let setupBusy = false;
 
 const pctText = p => Math.floor(p) + '%';
 const settingsDiffer = info => info.model && (info.model !== $('model').value || info.language !== $('lang').value);
@@ -164,11 +190,11 @@ function updateItem(it) {
 }
 
 function updateControls() {
-  $('start').disabled = running || !items.some(isRunnable);
+  $('start').disabled = running || !reqOk || setupBusy || !items.some(isRunnable);
   $('cancel').disabled = !running;
   $('pick').disabled = $('folder').disabled = running;
   $('clear').disabled = running || items.length === 0;
-  $('model').disabled = $('lang').disabled = $('skip').disabled = running;
+  $('model').disabled = $('lang').disabled = $('skip').disabled = $('words').disabled = running;
   const resumable = items.filter(canResume).length;
   $('count').textContent = items.length
     ? items.length + ' file' + (items.length === 1 ? '' : 's') + (resumable ? ` · ${resumable} resumable` : '')
@@ -241,9 +267,14 @@ $('start').onclick = () => {
     files: todo.map(i => ({ path: i.path, restart: i.restart })),
     model: $('model').value,
     lang: $('lang').value,
+    words: $('words').value,
     skipExisting: $('skip').checked
   });
 };
+
+// Remember the special-words list between sessions (only on this PC).
+try { $('words').value = localStorage.getItem('words') || ''; } catch {}
+$('words').oninput = () => { try { localStorage.setItem('words', $('words').value); } catch {} };
 
 $('cancel').onclick = () => { $('cancel').disabled = true; setMsg('Cancelling... (progress is kept)'); api.cancel(); };
 
@@ -280,6 +311,81 @@ api.on('finished', async s => {
   if (s.cancelled) parts.push(`${s.cancelled} cancelled`);
   setMsg('Finished: ' + parts.join(', ') + '.');
 });
+
+// ---- Requirements (Python + faster-whisper) ----
+function showSetup(state, title, text, { hint = '', install = false, recheck = false } = {}) {
+  $('setup').className = state;
+  $('setupTitle').textContent = title;
+  $('setupText').textContent = text;
+  $('setupHint').hidden = !hint;
+  $('setupHint').textContent = hint;
+  $('setupInstall').hidden = !install;
+  $('setupRecheck').hidden = !recheck;
+}
+
+function showCheck(r) {
+  reqOk = !!r.ok;
+  if (r.ok) {
+    showSetup('ok', '', '');
+  } else if (r.python) {
+    showSetup('', r.broken ? 'faster-whisper needs repair' : 'faster-whisper is not installed',
+      (r.broken
+        ? `The installed faster-whisper can't read videos (${r.broken}). `
+        : `Python was found (${r.python}), but the faster-whisper speech engine is missing. `) +
+      'Subtitle Generator can install a working copy into its own private Python environment ' +
+      '(about 300 MB download, needs an internet connection).',
+      { install: true, recheck: true });
+  } else {
+    showSetup('error', `Python ${r.minVersion} or newer was not found`,
+      'Subtitle Generator needs Python to create subtitles.' +
+      (r.tooOld ? ` Found ${r.tooOld}, which is too old.` : ''),
+      { hint: r.hint, recheck: true });
+  }
+  updateControls();
+}
+
+async function runCheck() {
+  setupBusy = true;
+  $('setupLog').hidden = true;
+  showSetup('checking', 'Checking for Python and faster-whisper...', '');
+  updateControls();
+  try { showCheck(await api.checkReqs()); }
+  catch (e) { showSetup('error', 'Could not check requirements', String(e), { recheck: true }); }
+  finally { setupBusy = false; updateControls(); }
+}
+
+$('setupRecheck').onclick = runCheck;
+
+$('setupInstall').onclick = async () => {
+  setupBusy = true;
+  $('setupLog').textContent = '';
+  $('setupLog').hidden = false;
+  showSetup('checking', 'Installing faster-whisper...', 'This can take several minutes. Please keep the app open.');
+  $('setupLog').hidden = false;
+  updateControls();
+  try {
+    const r = await api.installReqs();
+    if (r.ok) {
+      reqOk = true;
+      showSetup('ok', '', '');
+      setMsg('faster-whisper is installed. You can start creating subtitles.');
+    } else {
+      showSetup('error', 'Installation failed', r.error || 'Unknown error', { hint: r.hint || '', install: true, recheck: true });
+      $('setupLog').hidden = false;
+    }
+  } finally {
+    setupBusy = false;
+    updateControls();
+  }
+};
+
+api.on('setupLog', line => {
+  const log = $('setupLog');
+  log.textContent += line + '\n';
+  log.scrollTop = log.scrollHeight;
+});
+
+runCheck();
 
 // ---- Drag and drop ----
 let dragDepth = 0;

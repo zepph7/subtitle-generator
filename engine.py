@@ -209,8 +209,27 @@ def remaining_speech(audio, start: float) -> list[float]:
 
 # ---------------------------------------------------------------- transcribe
 
+# The smallest models lose their timestamps (30-second subtitle lines) when given
+# a word list, so the list is only used with small and bigger models.
+NO_HOTWORDS = {"tiny", "tiny.en", "base", "base.en"}
+
+
+def decode_options(words: str, model_name: str = "") -> dict:
+    """Settings that favour accuracy over speed.
+
+    - beam search (5 candidates) picks the most likely wording, not the first guess
+    - not conditioning on the previous text stops one misheard word or a
+      hallucinated line from spreading into the following lines
+    - hotwords: names and special terms are fed to every window so they are
+      spelled the way the user typed them"""
+    opts = {"beam_size": 5, "best_of": 5, "condition_on_previous_text": False}
+    if words and model_name not in NO_HOTWORDS:
+        opts["hotwords"] = words
+    return opts
+
+
 def transcribe_one(model: WhisperModel, model_name: str, video: Path, out: Path,
-                   lang_setting: str, resume_mismatch: str) -> tuple[int, int]:
+                   lang_setting: str, resume_mismatch: str, words: str = "") -> tuple[int, int]:
     """Returns (total segments, segments reused from a previous run)."""
     segments_done = load_partial(video)
     state = read_state(video)
@@ -247,6 +266,10 @@ def transcribe_one(model: WhisperModel, model_name: str, video: Path, out: Path,
                 started=state.get("started") if reused else now())
 
     audio = segments = info = None
+    opts = decode_options(words, model_name)
+    if words and "hotwords" not in opts:
+        print(f"    note: the special-words list is ignored with the '{model_name}' model; "
+              "use small or bigger", flush=True)
     try:
         if resume_from > 0:
             audio = decode_audio(str(video), sampling_rate=SAMPLE_RATE)
@@ -257,9 +280,10 @@ def transcribe_one(model: WhisperModel, model_name: str, video: Path, out: Path,
                   flush=True)
             if clips:
                 segments, info = model.transcribe(audio, language=language,
-                                                  clip_timestamps=clips)
+                                                  clip_timestamps=clips, **opts)
         else:
-            segments, info = model.transcribe(str(video), language=language, vad_filter=True)
+            segments, info = model.transcribe(str(video), language=language,
+                                              vad_filter=True, **opts)
             duration = info.duration
 
         duration = duration or 1
@@ -309,6 +333,9 @@ def main() -> int:
     parser.add_argument("-l", "--language", default="auto",
                         help="Language code (e.g. en, sw) or 'auto' to detect (default: auto)")
     parser.add_argument("-m", "--model", default="small", help="Whisper model size (default: small)")
+    parser.add_argument("-w", "--words", default="",
+                        help="Names and special words that appear in the audio, comma-separated, "
+                             "so they are recognised and spelled correctly")
     parser.add_argument("--overwrite", action="store_true",
                         help="Regenerate subtitles even if an .srt already exists")
     parser.add_argument("--restart", action="store_true",
@@ -367,7 +394,7 @@ def main() -> int:
                 print(f"    loading model '{args.model}' ({DEVICE}, {COMPUTE_TYPE})...", flush=True)
                 model = WhisperModel(args.model, device=DEVICE, compute_type=COMPUTE_TYPE)
             n, reused = transcribe_one(model, args.model, video, out, lang_setting,
-                                       args.resume_mismatch)
+                                       args.resume_mismatch, args.words.strip())
             elapsed = time.perf_counter() - start
             extra = f", {reused} reused from earlier run" if reused else ""
             print(f"    saved {out.name} ({n} segments{extra}, {elapsed:.0f}s)", flush=True)

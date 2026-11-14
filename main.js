@@ -1,5 +1,5 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -13,15 +13,172 @@ const VIDEO_SET = new Set(VIDEO_EXTS);
 const ENGINE = path.join(__dirname, 'engine.py')
   .replace(`app.asar${path.sep}`, `app.asar.unpacked${path.sep}`);
 
-// The installer writes the Python it found or installed to resources\python-path.txt
-// (see build/installer.nsh). Fall back to "python" on PATH (development, or if
-// that Python was removed later).
-function pythonCmd() {
+// ------------------------------------------------------------------ Python
+// Which Python runs engine.py, checked at startup (see checkRequirements):
+//   1. the app's private environment <userData>/python-env, created by the
+//      "Install faster-whisper" button (works where pip into the system Python is
+//      blocked, e.g. Ubuntu 23.04+, Debian 12, Homebrew)
+//   2. Windows: the Python the installer found/installed (resources\python-path.txt)
+//   3. python3 / python on PATH and the usual install locations. Mac apps started
+//      from Finder don't get the terminal's PATH, so Homebrew and python.org
+//      locations are listed explicitly.
+const IS_WIN = process.platform === 'win32';
+const MIN_PY = [3, 9];
+const venvDir = () => path.join(app.getPath('userData'), 'python-env');
+const venvPython = () => path.join(venvDir(), IS_WIN ? 'Scripts\\python.exe' : 'bin/python3');
+// faster-whisper 1.2.x passes an option that PyAV 17+ removed, so a fresh
+// "pip install faster-whisper" fails on every file. PyAV is pinned below 17, and a
+// Python that has a newer PyAV is reported as needing repair.
+const PIP_PACKAGES = ['faster-whisper', 'av<17'];
+const PY_PROBE = [
+  'import sys, json',
+  'fw = False; broken = None',
+  'try:',
+  '    import faster_whisper, av',
+  '    if int(av.__version__.split(".")[0]) >= 17:',
+  '        broken = "PyAV " + av.__version__ + " is not compatible with faster-whisper " + faster_whisper.__version__',
+  '    else:',
+  '        fw = True',
+  'except Exception:',
+  '    pass',
+  'print(json.dumps({"exe": sys.executable, "version": list(sys.version_info[:3]), "fw": fw,',
+  '                  "broken": broken, "venv": sys.prefix != sys.base_prefix}))'
+].join('\n');
+
+let pythonExe = null;      // Python with faster-whisper, set by checkRequirements()
+let basePython = null;     // a usable Python without faster-whisper (to create the venv from)
+let installing = false;
+
+function pythonCandidates() {
+  const list = [venvPython()];
+  if (IS_WIN) {
+    try {
+      const p = fs.readFileSync(path.join(process.resourcesPath, 'python-path.txt'), 'utf8').trim();
+      if (p) list.push(p);
+    } catch { /* not installed by the Windows installer */ }
+    list.push('python', 'py');
+  } else {
+    list.push('python3',
+      '/opt/homebrew/bin/python3',                                        // Homebrew, Apple Silicon
+      '/usr/local/bin/python3',                                           // Homebrew Intel / python.org
+      '/Library/Frameworks/Python.framework/Versions/Current/bin/python3',// python.org
+      '/usr/bin/python3',
+      'python');
+  }
+  return [...new Set(list)];
+}
+
+function probe(cmd) {
+  return new Promise(resolve => {
+    if (path.isAbsolute(cmd) && !fs.existsSync(cmd)) return resolve(null);
+    execFile(cmd, ['-c', PY_PROBE], {
+      timeout: 60000, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
+    }, (err, stdout) => {
+      if (err) return resolve(null);
+      try { resolve(JSON.parse(stdout.trim().split(/\r?\n/).pop())); } catch { resolve(null); }
+    });
+  });
+}
+
+const versionOk = v => v[0] === MIN_PY[0] && v[1] >= MIN_PY[1];
+
+function installHint() {
+  if (process.platform === 'linux') {
+    return 'Install Python 3 with your package manager, then click "Check again":\n' +
+      '  Ubuntu / Debian / Mint:  sudo apt install python3 python3-venv\n' +
+      '  Fedora:                  sudo dnf install python3\n' +
+      '  Arch / Manjaro:          sudo pacman -S python';
+  }
+  if (process.platform === 'darwin') {
+    return 'Install Python 3 from https://www.python.org/downloads/macos/\n' +
+      'or, with Homebrew:  brew install python\n' +
+      'then click "Check again".';
+  }
+  return 'Reinstall Subtitle Generator (its installer can install Python for you),\n' +
+    'or install Python from https://www.python.org/downloads/ and tick\n' +
+    '"Add python.exe to PATH", then click "Check again".';
+}
+
+async function checkRequirements() {
+  pythonExe = null;
+  basePython = null;
+  let tooOld = null, broken = null;
+  for (const cmd of pythonCandidates()) {
+    const r = await probe(cmd);
+    if (!r) continue;
+    if (!versionOk(r.version)) { tooOld = tooOld || r; continue; }
+    if (r.fw) {
+      pythonExe = r.exe;
+      return { ok: true, python: r.exe, version: r.version.join('.'), platform: process.platform };
+    }
+    if (r.broken && !broken) broken = r.broken;
+    if (!r.venv && !basePython) basePython = r.exe;
+  }
+  return {
+    ok: false,
+    platform: process.platform,
+    python: basePython,
+    tooOld: tooOld ? `${tooOld.exe} (Python ${tooOld.version.join('.')})` : null,
+    broken,
+    minVersion: MIN_PY.join('.'),
+    hint: installHint()
+  };
+}
+
+// Runs a command, streaming its output to the setup panel. Resolves to { code, out }.
+function runLogged(cmd, args) {
+  return new Promise(resolve => {
+    send('setupLog', `> ${path.basename(cmd)} ${args.join(' ')}`);
+    let out = '', buf = '';
+    const p = spawn(cmd, args, { windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } });
+    const onData = d => {
+      const s = d.toString();
+      out += s;
+      buf += s;
+      const lines = buf.split(/\r\n|\r|\n/);
+      buf = lines.pop();
+      for (const l of lines) if (l.trim()) send('setupLog', l);
+    };
+    p.stdout.on('data', onData);
+    p.stderr.on('data', onData);
+    p.on('error', e => resolve({ code: -1, out: e.message }));
+    p.on('close', code => { if (buf.trim()) send('setupLog', buf); resolve({ code, out }); });
+  });
+}
+
+// Creates <userData>/python-env and installs faster-whisper into it.
+async function installRequirements() {
+  if (installing) return { ok: false, error: 'An installation is already running.' };
+  if (!basePython) await checkRequirements();
+  if (pythonExe) return { ok: true };
+  if (!basePython) return { ok: false, error: 'Python was not found.', hint: installHint() };
+
+  installing = true;
   try {
-    const p = fs.readFileSync(path.join(process.resourcesPath, 'python-path.txt'), 'utf8').trim();
-    if (p && fs.existsSync(p)) return p;
-  } catch { /* not installed by the installer */ }
-  return 'python';
+    const dir = venvDir();
+    send('setupLog', `Creating a private Python environment in ${dir}`);
+    fs.rmSync(dir, { recursive: true, force: true });           // remove a broken earlier attempt
+    let r = await runLogged(basePython, ['-m', 'venv', dir]);
+    if (r.code !== 0) {
+      const debianHint = /ensurepip|python3-venv/i.test(r.out)
+        ? '\nOn Ubuntu/Debian install the venv module first:  sudo apt install python3-venv' : '';
+      return { ok: false, error: 'Could not create the Python environment.' + debianHint };
+    }
+    send('setupLog', 'Installing faster-whisper (about 300 MB, this can take several minutes)...');
+    await runLogged(venvPython(), ['-m', 'pip', 'install', '--upgrade', '--disable-pip-version-check', 'pip']);
+    r = await runLogged(venvPython(), ['-m', 'pip', 'install', '--disable-pip-version-check', ...PIP_PACKAGES]);
+    if (r.code !== 0) return { ok: false, error: 'pip could not install faster-whisper (see the log above).' };
+    const check = await checkRequirements();
+    if (!check.ok) return { ok: false, error: 'faster-whisper was installed but cannot be loaded.' };
+    send('setupLog', 'Done. faster-whisper is ready.');
+    return { ok: true, check };
+  } finally {
+    installing = false;
+  }
+}
+
+function pythonCmd() {
+  return pythonExe || (IS_WIN ? 'python' : 'python3');
 }
 
 let win, current = null, cancelled = false, running = false;
@@ -133,6 +290,9 @@ ipcMain.handle('pickFolder', async () => {
 
 ipcMain.handle('expand', (_, paths) => expandPaths(paths));
 
+ipcMain.handle('checkReqs', () => checkRequirements());
+ipcMain.handle('installReqs', () => installRequirements());
+
 ipcMain.handle('inspect', (_, paths) => {
   const out = {};
   for (const p of Array.isArray(paths) ? paths : []) if (typeof p === 'string') out[p] = inspect(p);
@@ -142,10 +302,11 @@ ipcMain.handle('inspect', (_, paths) => {
 const OOM = /mkl_malloc|MemoryError|out of memory|bad_alloc|failed to allocate/i;
 
 // One Python process per file: when it exits, the OS reclaims all of its memory.
-function runOne(file, { model, lang, overwrite, restart, mismatch }) {
+function runOne(file, { model, lang, words, overwrite, restart, mismatch }) {
   return new Promise(resolve => {
     const args = ['-u', ENGINE, file, '--model', model, '--language', lang,
       '--resume-mismatch', mismatch];
+    if (words) args.push('--words', words);
     if (overwrite) args.push('--overwrite');
     if (restart) args.push('--restart');
     const p = spawn(pythonCmd(), args, {
@@ -219,13 +380,16 @@ const SUMMARY_KEY = { done: 'done', error: 'failed', skipped: 'skipped', cancell
 const MODEL_RE = /^[\w.-]+$/, LANG_RE = /^([a-z]{2,3}|auto)$/;
 
 ipcMain.handle('run', async (_, opts) => {
-  if (running) return null;
+  if (running || installing) return null;
+  if (!pythonExe) await checkRequirements();
   const jobs = (Array.isArray(opts?.files) ? opts.files : [])
     .filter(j => j && typeof j.path === 'string' && j.path)
     .map(j => ({ path: j.path, restart: !!j.restart }));
   const model = MODEL_RE.test(opts?.model) ? opts.model : 'small';
   const lang = LANG_RE.test(opts?.lang) ? opts.lang : 'auto';
   const skipExisting = !!opts?.skipExisting;
+  const words = typeof opts?.words === 'string'
+    ? opts.words.replace(/\s+/g, ' ').trim().slice(0, 500) : '';
 
   running = true;
   cancelled = false;
@@ -265,7 +429,7 @@ ipcMain.handle('run', async (_, opts) => {
 
     send('status', { file, state: 'running', resumePct: restart ? 0 : info.pct });
     const r = await runOne(file, {
-      model: runModel, lang: runLang, overwrite: !skipExisting, restart, mismatch: 'continue'
+      model: runModel, lang: runLang, words, overwrite: !skipExisting, restart, mismatch: 'continue'
     });
     report(file, r.state, r.error);
   }

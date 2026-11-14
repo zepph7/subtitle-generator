@@ -3,7 +3,8 @@
 ; After the "choose install folder" page and before files are installed, a
 ; "Required components" page checks this computer for:
 ;   - Python 3.10+                       (app runs engine.py with it)
-;   - faster-whisper (pip package)       (the transcription engine)
+;   - faster-whisper (pip package)       (the transcription engine; PyAV pinned <17,
+;                                         because faster-whisper 1.2.x fails with PyAV 17+)
 ;   - Microsoft Visual C++ Runtime x64   (needed by faster-whisper's ctranslate2)
 ; Anything missing is offered with a ticked "Install" box. The page is skipped
 ; when everything is already present. The chosen installs run during the
@@ -119,7 +120,7 @@
 
     ; faster-whisper
     ${If} $ReqPython != ""
-      nsExec::ExecToStack '"$ReqPython" -c "import faster_whisper"'
+      nsExec::ExecToStack `"$ReqPython" -c "import sys, faster_whisper, av; sys.exit(int(av.__version__.split('.')[0]) >= 17)"`
       Pop $0
       Pop $1
       ${If} $0 == 0
@@ -317,9 +318,9 @@
         StrCpy $ReqFailed "$ReqFailed$\r$\n - faster-whisper (Python is not available)"
       ${Else}
         DetailPrint "Installing faster-whisper with pip (large download, please wait)..."
-        nsExec::ExecToLog '"$ReqPython" -m pip install --upgrade --disable-pip-version-check faster-whisper'
+        nsExec::ExecToLog '"$ReqPython" -m pip install --upgrade --disable-pip-version-check faster-whisper "av<17"'
         Pop $0
-        nsExec::ExecToStack '"$ReqPython" -c "import faster_whisper"'
+        nsExec::ExecToStack `"$ReqPython" -c "import sys, faster_whisper, av; sys.exit(int(av.__version__.split('.')[0]) >= 17)"`
         Pop $0
         Pop $1
         ${If} $0 == 0
